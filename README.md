@@ -43,7 +43,19 @@ Two independent verdicts, deliberately kept separate:
 | `resolved` | objective, binary | every `FAIL_TO_PASS` test now passes and no `PASS_TO_PASS` test broke |
 | `similarity` | subjective, graded | `equivalent` / `different-but-valid` / `worse` / `wrong` |
 
-**`resolved` is the headline metric.** `similarity` is a diagnostic: it explains *why* something failed, and disagreement between the two usually indicates a harness bug rather than an agent one.
+**`resolved` is the headline metric.**
+`similarity` is the diagnostic that explains why.
+
+Crossing them gives the confusion matrix that `make metrics` reports:
+
+| | judge says valid | judge says wrong |
+|---|---|---|
+| **passed tests** | `TP` genuinely fixed | `FP` passes but behaviourally wrong |
+| **failed tests** | `FN` plausible fix the tests reject | `TN` genuinely failed |
+
+Neither signal is ground truth alone.
+A fix can pass every test while leaking global state, and a defensible fix can fail tests that encode one specific redesign.
+The off-diagonal is where the benchmark is misleading you, in one direction or the other, so `FP` and `FN` counts matter as much as the solve rate.
 
 ## Design notes
 
@@ -114,8 +126,13 @@ Both halves matter, since the same model scores differently under a different ha
 ```bash
 make runners                                  # list them
 make pilot RUNNER=pi-deepseek-v4-flash        # benchmark one
-make compare A=claude-opus B=claude-haiku
+make sweep                                    # benchmark all of them, same instances
+make metrics                                  # solve rate, confusion matrix, time, cost
 ```
+
+`make sweep` runs the runners one at a time rather than in parallel.
+They share the agent concurrency limit, and the Claude runners share a rate limit, so overlapping them trades wall-clock for throttling.
+It goes cheapest first, so a broken sweep surfaces before the expensive runners spend anything.
 
 State, logs and results are scoped per runner, so runs never overwrite each other.
 

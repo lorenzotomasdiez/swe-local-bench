@@ -37,6 +37,12 @@ runners:                  ## list the runners that can be benchmarked
 compare:                  ## compare runners: make compare A=claude-opus B=claude-haiku
 	@cd $(H) && $(PY) compare.py $(or $(A),claude-opus) $(or $(B),claude-sonnet)
 
+sweep:                    ## benchmark every runner over the same PILOT instances
+	@bash $(H)/sweep.sh $(PILOT)
+
+metrics:                  ## solve rate, confusion matrix, time and cost per runner
+	@cd $(H) && $(PY) metrics.py $(RUNNERS)
+
 status:                   ## snapshot the current run (safe from another shell)
 	@cd $(H) && $(PY) render.py
 
