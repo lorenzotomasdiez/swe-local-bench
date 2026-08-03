@@ -3,8 +3,11 @@
 
 H := harness
 PY := python3
-PILOT ?= 3
-WORKERS ?=
+PILOT ?= 10
+
+# The runner under test. See RUNNERS in harness/config.py for the list.
+RUNNER ?= claude-opus
+export RUNNER
 
 help:                     ## show this help
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/' | expand -t22
@@ -19,7 +22,7 @@ instances:                ## mine PRs -> harness/instances.jsonl
 	@bash $(H)/mine.sh
 	@cd $(H) && $(PY) resolve.py /tmp/prs.jsonl instances.jsonl
 
-pilot:                    ## run PILOT instances (default 3) with live status
+pilot:                    ## run PILOT instances (default 10): make pilot RUNNER=pi-deepseek-v4-flash
 	@cd $(H) && $(PY) orchestrate.py --limit $(PILOT) --fresh
 
 run:                      ## run all instances with live status
@@ -28,8 +31,11 @@ run:                      ## run all instances with live status
 ids:                      ## run specific PRs: make ids IDS=14493,14466
 	@cd $(H) && $(PY) orchestrate.py --ids $(IDS) --fresh
 
-compare:                  ## compare two models: make compare A=opus B=sonnet
-	@cd $(H) && $(PY) compare.py $(or $(A),opus) $(or $(B),sonnet)
+runners:                  ## list the runners that can be benchmarked
+	@cd $(H) && $(PY) -c "import config,json; [print(f'{k:<24}{v[\"cli\"]:<8}{v[\"model\"]}') for k,v in config.RUNNERS.items()]"
+
+compare:                  ## compare runners: make compare A=claude-opus B=claude-haiku
+	@cd $(H) && $(PY) compare.py $(or $(A),claude-opus) $(or $(B),claude-sonnet)
 
 status:                   ## snapshot the current run (safe from another shell)
 	@cd $(H) && $(PY) render.py

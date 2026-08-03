@@ -22,15 +22,16 @@ import sys
 import time
 
 from config import (
+    AGENT,
     HARNESS,
     INSTANCES,
     LIMITS,
     PYTHON,
     REPO,
     ROOT,
+    RUNNER,
     RUNS,
     STAGES,
-    AGENT_MODEL,
     JUDGE_MODEL,
     STATE,
     TIMEOUTS,
@@ -55,6 +56,7 @@ class State:
         self.path = STATE / f"{iid}.json"
         self.d = json.loads(self.path.read_text()) if self.path.exists() else {
             "id": iid,
+            "runner": RUNNER,
             "stage": None,
             "status": "pending",
             "stages": {},
@@ -63,8 +65,10 @@ class State:
             "p2p": [],
             "resolved": None,
             "similarity": None,
+            "agent_cost_usd": None,
             "note": "",
         }
+        self.d["runner"] = RUNNER
 
     def save(self) -> None:
         tmp = self.path.with_suffix(".tmp")
@@ -121,6 +125,18 @@ async def sh(cmd: list[str], cwd=None, timeout=300, env=None, log=None):
     return p.returncode, text
 
 
+def write_version_stub(wt) -> None:
+    """(Re)write the version file setuptools_scm would normally generate.
+
+    Rewritten before scoring, not just at setup: an agent that triggers a
+    build - `pip install -e .`, `tox`, even running pytest a certain way -
+    makes setuptools_scm regenerate this from the synthetic one-commit repo
+    as `0.1.dev1+g<sha>`. pytest's own pyproject.toml sets minversion = 2.0,
+    so pytest then refuses to start and a correct fix scores zero.
+    """
+    (wt / "src" / "_pytest" / "_version.py").write_text(VERSION_STUB)
+
+
 async def materialize(dest, commit: str, scrub: bool):
     """Extract `commit` into `dest` as a standalone git repo.
 
@@ -136,8 +152,7 @@ async def materialize(dest, commit: str, scrub: bool):
     if rc != 0:
         raise RuntimeError(f"archive failed: {out}")
 
-    # setuptools_scm normally writes this at build time.
-    (dest / "src" / "_pytest" / "_version.py").write_text(VERSION_STUB)
+    write_version_stub(dest)
 
     if scrub:
         await sh(["git", "init", "-q", "-b", "main"], cwd=dest)
@@ -186,14 +201,89 @@ async def collect_targets(wt, files: list[str]) -> list[str]:
 
 
 async def claude(prompt: str, cwd, timeout: int, log=None, model=None) -> str:
+    """Run Claude and return its text reply. Used for capture and judge only."""
     rc, out = await sh(
         ["claude", "-p", prompt, "--dangerously-skip-permissions",
-         "--model", model or AGENT_MODEL],
+         "--model", model or JUDGE_MODEL],
         cwd=cwd, timeout=timeout, log=log,
     )
     if rc != 0:
         raise RuntimeError(f"claude exited {rc}")
     return out
+
+
+# ──────────────────────────── agent runners ───────────────────────────
+#
+# Each runner reports what it spent. Cost is a first-class result: a runner
+# that resolves 60% for 20x the money is not the better runner, and without
+# per-runner cost the comparison table cannot say so.
+
+
+def _claude_cmd(spec, prompt):
+    return ["claude", "-p", prompt, "--dangerously-skip-permissions",
+            "--model", spec["model"], "--output-format", "json"]
+
+
+def _claude_cost(out: str) -> float:
+    """`--output-format json` emits one object with total_cost_usd."""
+    return float(json.loads(out).get("total_cost_usd") or 0.0)
+
+
+def _pi_cmd(spec, prompt):
+    cmd = ["pi", "-p", prompt, "--mode", "json", "--no-session",
+           "--provider", spec["provider"], "--model", spec["model"]]
+    if spec.get("thinking"):
+        cmd += ["--thinking", spec["thinking"]]
+    return cmd
+
+
+def _pi_cost(out: str) -> float:
+    """Sum cost over assistant turns in pi's JSONL event stream.
+
+    Only `message_end` is summed. `turn_end` repeats the same message object
+    and `agent_end` repeats the whole conversation, so counting those would
+    multiply the bill. Tool results carry no usage.
+    """
+    total = 0.0
+    for line in out.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") != "message_end":
+            continue
+        msg = ev.get("message") or {}
+        if msg.get("role") != "assistant":
+            continue
+        total += float(((msg.get("usage") or {}).get("cost") or {}).get("total") or 0.0)
+    return total
+
+
+CLIS = {
+    "claude": (_claude_cmd, _claude_cost),
+    "pi": (_pi_cmd, _pi_cost),
+}
+
+
+async def run_agent(prompt: str, cwd, timeout: int, log=None) -> float:
+    """Run the configured agent in `cwd`; return what it cost in USD.
+
+    The agent edits the checkout in place - the edits are the result. The
+    return value is only the price tag.
+    """
+    build, price = CLIS[AGENT["cli"]]
+    rc, out = await sh(build(AGENT, prompt), cwd=cwd, timeout=timeout, log=log)
+    if rc != 0:
+        raise RuntimeError(f"{AGENT['cli']} exited {rc}")
+    try:
+        return price(out)
+    except Exception:
+        # A cost we cannot parse must not fail an otherwise good run; it is
+        # reported as unknown rather than silently counted as zero.
+        return float("nan")
 
 
 # ─────────────────────────────── stages ───────────────────────────────
@@ -268,7 +358,7 @@ async def stage_agent(inst, st):
         wt = WORKTREES / inst["instance_id"] / "agent"
         run = RUNS / inst["instance_id"]
         try:
-            await claude(
+            cost = await run_agent(
                 AGENT_PROMPT.format(problem=inst["problem_statement"]),
                 cwd=wt, timeout=TIMEOUTS["agent"], log=run / "agent.log",
             )
@@ -278,6 +368,7 @@ async def stage_agent(inst, st):
         except Exception as e:
             st.end("agent", "failed", error=str(e)[:300])
             return False
+        st.d["agent_cost_usd"] = None if cost != cost else round(cost, 6)  # NaN check
         st.end("agent", "ok")
         return True
 
@@ -312,13 +403,24 @@ async def stage_capture(inst, st):
 
 
 async def stage_test(inst, st):
-    """Discard any test edits the agent made, apply the real tests, score."""
+    """Reduce the agent's work to its source changes, apply the real tests, score.
+
+    The agent's contribution is defined as exactly what it changed under
+    `src/`. Everything else is reverted to base: test edits (so it cannot
+    pass by weakening the suite), and equally config, tooling and build
+    metadata (so an incidental `pip install -e .` cannot break scoring).
+    Gold patches only ever touch `src/`, so nothing legitimate is discarded.
+    """
     async with SEM["test"]:
         st.begin("test")
         wt = WORKTREES / inst["instance_id"] / "agent"
         run = RUNS / inst["instance_id"]
+        outside_src = ":(exclude)src"
         await sh(["git", "restore", "--source=HEAD", "--staged", "--worktree",
-                  "--", "testing/"], cwd=wt)
+                  "--", outside_src], cwd=wt)
+        # restore only revives tracked files; drop anything the agent added.
+        await sh(["git", "clean", "-fdq", "--", outside_src], cwd=wt)
+        write_version_stub(wt)
         rc, out = await sh(["git", "apply", str(run / "test_patch.diff")], cwd=wt)
         if rc != 0:
             st.end("test", "failed", error=f"test_patch did not apply: {out[:300]}")
@@ -433,6 +535,7 @@ async def main():
         for i in insts:
             (STATE / f"{i['instance_id']}.json").unlink(missing_ok=True)
 
+    print(f"runner {RUNNER} ({AGENT['cli']} / {AGENT['model']}), judge {JUDGE_MODEL}")
     print(f"running {len(insts)} instance(s): "
           f"{', '.join(str(i['pr']) for i in insts)}\n")
 

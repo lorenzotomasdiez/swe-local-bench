@@ -14,15 +14,44 @@ PYTHON = VENV / "bin" / "python"
 
 INSTANCES = HARNESS / "instances.jsonl"
 
-# Pinned explicitly so results never depend on ~/.claude/settings.json.
-# AGENT_MODEL is what's being benchmarked; JUDGE_MODEL grades it and should
-# stay fixed across models, otherwise you're changing two variables at once.
-AGENT_MODEL = os.environ.get("AGENT_MODEL", "opus")
+# ─────────────────────────────── runners ──────────────────────────────
+#
+# A runner is the thing under test: a CLI harness plus the model driving it.
+# Both halves matter - the same model scores differently under a different
+# harness - so the runner name, not the model name, is the unit of comparison.
+#
+# Every field is pinned here rather than inherited from ~/.claude/settings.json
+# or ~/.pi/agent/settings.json. A personal setting change must never silently
+# move a benchmark number.
+
+RUNNERS = {
+    "claude-opus": {"cli": "claude", "model": "opus"},
+    "claude-sonnet": {"cli": "claude", "model": "sonnet"},
+    "claude-haiku": {"cli": "claude", "model": "haiku"},
+    "pi-deepseek-v4-flash": {
+        "cli": "pi",
+        "provider": "openrouter",
+        "model": "deepseek/deepseek-v4-flash",
+        # pi reads defaultThinkingLevel from user settings; pin it.
+        "thinking": "high",
+    },
+}
+
+RUNNER = os.environ.get("RUNNER", "claude-opus")
+if RUNNER not in RUNNERS:
+    raise SystemExit(
+        f"unknown RUNNER {RUNNER!r}. known: {', '.join(sorted(RUNNERS))}"
+    )
+AGENT = RUNNERS[RUNNER]
+
+# The judge grades every runner and must stay fixed, otherwise a comparison
+# moves two variables at once. It is always Claude: a runner being benchmarked
+# should never also be scoring itself.
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "opus")
 
-# State is scoped per agent model so runs never clobber each other.
-STATE = HARNESS / "state" / AGENT_MODEL
-RUNS = HARNESS / "runs" / AGENT_MODEL
+# State is scoped per runner so runs never clobber each other.
+STATE = HARNESS / "state" / RUNNER
+RUNS = HARNESS / "runs" / RUNNER
 
 # Stage-level concurrency. API-bound stages get fewer slots than CPU-bound ones.
 LIMITS = {

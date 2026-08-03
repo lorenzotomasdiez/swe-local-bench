@@ -13,7 +13,7 @@ bad()  { printf '  \033[31m✗\033[0m %s\n' "$*"; FAIL=1; }
 step() { printf '\n\033[36m▸ %s\033[0m\n' "$*"; }
 
 step "checking tools"
-for t in git jq uv gh claude tar; do
+for t in git jq uv gh claude pi tar; do
   command -v "$t" >/dev/null && ok "$t" || bad "$t not found on PATH"
 done
 
@@ -33,6 +33,15 @@ if _timeout 90 claude -p 'reply with exactly: OK' 2>/dev/null | grep -q OK; then
   ok "claude -p responds"
 else
   bad "claude -p did not respond - check your login"
+fi
+
+step "checking pi CLI"
+# pi drives the non-Claude runners. Its credentials live in ~/.pi/agent/auth.json
+# (or provider env vars); a missing key only surfaces at agent time otherwise.
+if _timeout 120 pi -p --no-session 'reply with exactly: OK' 2>/dev/null | grep -q OK; then
+  ok "pi -p responds"
+else
+  bad "pi -p did not respond - run: pi, then /login"
 fi
 
 step "checking repo"

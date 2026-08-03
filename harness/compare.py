@@ -12,7 +12,7 @@ import sys
 
 from config import HARNESS, INSTANCES
 
-A, B = (sys.argv[1:3] + ["opus", "sonnet"])[:2]
+A, B = (sys.argv[1:3] + ["claude-opus", "claude-sonnet"])[:2]
 insts = {json.loads(l)["instance_id"]: json.loads(l)
          for l in INSTANCES.read_text().splitlines() if l.strip()}
 

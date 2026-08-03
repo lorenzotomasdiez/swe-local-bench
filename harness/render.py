@@ -11,7 +11,7 @@ import json
 import sys
 import time
 
-from config import STAGES, STATE
+from config import RUNNER, STAGES, STATE
 
 G, Y, R, B, D, X = (
     "\033[32m", "\033[33m", "\033[31m", "\033[36m", "\033[2m", "\033[0m"
@@ -43,9 +43,10 @@ def _elapsed(d):
 def table(ids) -> str:
     rows = read(ids)
     pipe_hdr = "".join(s[:4].ljust(5) for s in STAGES)
-    L = [f"{'INSTANCE':<14}{pipe_hdr}  {'ELAPSED':<9}{'F2P':<7}"
+    L = [f"{B}runner: {RUNNER}{X}",
+         f"{'INSTANCE':<14}{pipe_hdr}  {'ELAPSED':<9}{'COST':<9}{'F2P':<7}"
          f"{'RESOLVED':<10}{'JUDGE':<20}STATUS",
-         D + "─" * 108 + X]
+         D + "─" * 118 + X]
     for d in rows:
         pipe = "".join(
             GLYPH.get(d["stages"].get(s, {}).get("status")).ljust(
@@ -64,8 +65,10 @@ def table(ids) -> str:
                else Y if status == "running" else D)
         cur = d.get("stage") or ""
         note = f"  {D}{d.get('note', '')[:38]}{X}" if d.get("note") else ""
+        c = d.get("agent_cost_usd")
+        cost = f"${c:.4f}" if isinstance(c, (int, float)) else "-"
         L.append(f"{d['id'].split('-')[-1]:<14}{pipe}  {_elapsed(d):<9}"
-                 f"{f2p:<7}{resolved:<19}{sim:<20}{col}{status}{X}"
+                 f"{cost:<9}{f2p:<7}{resolved:<19}{sim:<20}{col}{status}{X}"
                  f"{D}/{cur}{X}{note}")
     return "\n".join(L)
 
@@ -78,10 +81,20 @@ def summary(ids) -> str:
     nodisc = [d for d in done if "NO_DISCRIMINATOR" in (d.get("note") or "")]
     bad = [d for d in done if d.get("status") in ("failed", "timeout")]
     pct = f"{100 * len(solved) / len(scored):.0f}%" if scored else "n/a"
+
+    costs = [d["agent_cost_usd"] for d in rows
+             if isinstance(d.get("agent_cost_usd"), (int, float))]
+    secs = [d["stages"]["agent"]["secs"] for d in rows
+            if "secs" in d.get("stages", {}).get("agent", {})]
+    spend = (f"   |  spend ${sum(costs):.2f} (avg ${sum(costs)/len(costs):.4f})"
+             if costs else "")
+    dur = f"   |  avg agent {sum(secs)/len(secs)/60:.1f}m" if secs else ""
+
     return (f"\n{B}resolved {len(solved)}/{len(scored)} scored ({pct}){X}"
             f"   |  no-discriminator: {len(nodisc)}"
             f"   |  failed/timeout: {len(bad)}"
-            f"   |  complete: {len(done)}/{len(rows)}")
+            f"   |  complete: {len(done)}/{len(rows)}"
+            f"{spend}{dur}")
 
 
 async def live(ids, tasks, plain=False):
