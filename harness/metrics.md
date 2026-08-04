@@ -1,22 +1,18 @@
 # Cross-runner metrics
 
-10 instances, 1 runner.
+1 instances, 4 runners.
+
+Dropped, not attempted by every runner: 14692, 14694, 14702, 14730, 14744, 14746, 14747, 14752, 14753.
 
 | Runner | Solve rate | TP | FP | FN | TN | Avg time | Avg cost | Total |
 |---|---|---|---|---|---|---|---|---|
-| pi-deepseek-v4-flash | 4/9 (44%) | 2 | 2 | 1 | 4 | 6.1m | $0.0725 | $0.65 |
+| pi-deepseek-v4-flash | - | 0 | 0 | 0 | 0 | - | - | - |
+| claude-haiku | - | 0 | 0 | 0 | 0 | - | - | - |
+| claude-sonnet | - | 0 | 0 | 0 | 0 | - | - | - |
+| claude-opus | - | 0 | 0 | 0 | 0 | - | - | - |
 
 TP passed tests and judged valid. FP passed tests but judged wrong. FN judged valid but failed tests. TN failed tests and judged wrong.
 
-| PR | pi-deepseek-v4-flash |
-|---|---|
-| 14692 | ❌ TN |
-| 14694 | –  |
-| 14702 | ❌ TN |
-| 14730 | ✅ TP |
-| 14744 | ❌ TN |
-| 14746 | ✅ FP |
-| 14747 | ✅ FP |
-| 14752 | ✅ TP |
-| 14753 | ❌ FN |
-| 14760 | ❌ TN |
+| PR | pi-deepseek-v4-flash | claude-haiku | claude-sonnet | claude-opus |
+|---|---|---|---|---|
+| 14760 | –  | –  | –  | –  |

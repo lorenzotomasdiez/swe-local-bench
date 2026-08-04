@@ -17,6 +17,25 @@ if [ ${#RUNNERS[@]} -eq 0 ]; then
   RUNNERS=(pi-deepseek-v4-flash claude-haiku claude-sonnet claude-opus)
 fi
 
+# Validate the whole list before spending anything. A sweep costs money and
+# hours, so a typo must fail in the first second, not after the cheap runner
+# has finished and the expensive one starts on a name nobody meant.
+KNOWN=$(python3 -c 'import config; print(" ".join(config.RUNNERS))')
+for r in "${RUNNERS[@]}"; do
+  case " $KNOWN " in
+    *" $r "*) ;;
+    *) printf '\033[31munknown runner: %s\033[0m\nknown: %s\n' "$r" "$KNOWN"; exit 1 ;;
+  esac
+done
+
+# --fresh discards prior results for these instances. Say so up front: an
+# accidental re-run of an already-benchmarked runner is expensive to undo.
+printf 'sweep: %s instances x %s runner(s): %s\n' "$N" "${#RUNNERS[@]}" "${RUNNERS[*]}"
+for r in "${RUNNERS[@]}"; do
+  n=$(ls "state/$r"/*.json 2>/dev/null | wc -l | tr -d ' ')
+  [ "$n" -gt 0 ] && printf '\033[33m  %s already has %s result(s) - they will be discarded\033[0m\n' "$r" "$n"
+done
+
 for r in "${RUNNERS[@]}"; do
   printf '\n\033[36m▸ %s (%s instances)\033[0m\n' "$r" "$N"
   RUNNER="$r" python3 orchestrate.py --limit "$N" --fresh --no-ui \

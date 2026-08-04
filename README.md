@@ -8,16 +8,7 @@ Currently targets [`pytest-dev/pytest`](https://github.com/pytest-dev/pytest).
 ## Results
 
 <!-- RESULTS:BEGIN -->
-Last sweep: **10 instances**, 1 runners, judged by Claude `opus`.
-
-| Runner | Solve rate | TP | FP | FN | TN | Avg time | Avg cost | Total |
-|---|---|---|---|---|---|---|---|---|
-| pi-deepseek-v4-flash | 4/9 (44%) | 2 | 2 | 1 | 4 | 6.1m | $0.0725 | $0.65 |
-
-`TP` passed and judged valid. `FP` passed but judged wrong. `FN` judged valid but failed. `TN` failed and judged wrong.
-
-Solve rate alone overstates a runner that scores `FP`, and understates one that scores `FN`.
-Per-instance detail is in `harness/metrics.md`.
+No sweep has been run yet. Run `make sweep`.
 <!-- RESULTS:END -->
 
 ## Why this exists

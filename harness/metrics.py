@@ -199,6 +199,13 @@ def main() -> None:
     (HARNESS / "metrics.md").write_text("\n".join(md) + "\n")
     written = "metrics.md"
 
+    # An interrupted sweep leaves runners with state but nothing scored.
+    # Publishing that produces a README full of empty rows that reads like a
+    # real result, which is worse than publishing nothing.
+    if to_readme and not any(s["evaluated"] for s in rows):
+        print(f"{R}nothing scored - README left untouched{X}")
+        to_readme = False
+
     if to_readme:
         block = [
             f"Last sweep: **{len(ids)} instances**, {len(runners)} {plural}, "
