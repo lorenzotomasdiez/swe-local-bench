@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sys
 import time
 
@@ -104,21 +105,53 @@ class State:
 # ────────────────────────────── helpers ───────────────────────────────
 
 
+# Every child runs in its own process group so it can be killed as a tree.
+# An agent CLI spawns its own children - node, python, git - and killing only
+# the parent leaves those running: an orphaned agent kept burning API credit
+# for 38 minutes past its 30 minute timeout because the orchestrator died
+# first and nothing was left to enforce it.
+LIVE: set[int] = set()
+
+
+def _killpg(pgid: int) -> None:
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return
+        except OSError:
+            return
+
+
+def _reap_all(*_) -> None:
+    """Take every running agent down with us, then die."""
+    for pgid in list(LIVE):
+        _killpg(pgid)
+    sys.exit(130)
+
+
 async def sh(cmd: list[str], cwd=None, timeout=300, env=None, log=None):
     """Run a command, capture output, optionally tee to a log file."""
     e = {**os.environ, **(env or {})}
     p = await asyncio.create_subprocess_exec(
         *cmd, cwd=cwd, env=e,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
     )
+    LIVE.add(p.pid)
     try:
         out, _ = await asyncio.wait_for(p.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        p.kill()
-        await p.wait()
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        _killpg(p.pid)
+        try:
+            await asyncio.wait_for(p.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            pass
         if log:
             log.write_text("*** TIMEOUT ***\n")
         raise
+    finally:
+        LIVE.discard(p.pid)
     text = out.decode("utf-8", "replace")
     if log:
         log.write_text(text)
@@ -528,6 +561,9 @@ async def main():
         insts = insts[: a.limit]
     if not insts:
         sys.exit("no instances selected")
+
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(s, _reap_all)
 
     STATE.mkdir(parents=True, exist_ok=True)
     RUNS.mkdir(parents=True, exist_ok=True)

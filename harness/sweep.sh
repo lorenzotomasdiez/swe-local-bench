@@ -27,4 +27,4 @@ for r in "${RUNNERS[@]}"; do
 done
 
 printf '\n\033[36m▸ metrics\033[0m\n'
-python3 metrics.py "${RUNNERS[@]}"
+python3 metrics.py --readme "${RUNNERS[@]}"

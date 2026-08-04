@@ -1,4 +1,4 @@
-.PHONY: help setup doctor instances pilot run status report clean clean-worktrees clean-state
+.PHONY: help setup doctor instances pilot run ids runners sweep metrics status report stop clean clean-worktrees clean-state clean-venv
 .DEFAULT_GOAL := help
 
 H := harness
@@ -49,11 +49,31 @@ status:                   ## snapshot the current run (safe from another shell)
 report:                   ## write results.md + results.json
 	@cd $(H) && $(PY) report.py
 
+# Every destructive target refuses to run while a sweep is in flight.
+# A run costs real money and takes hours; deleting its state or its
+# worktrees mid-flight throws that away with no way to recover it.
+define no-run-in-flight
+	@pgrep -f "orchestrate.py" >/dev/null 2>&1 && { \
+	  echo "a run is in progress - stop it first (make stop)"; exit 1; } || true
+endef
+
+stop:                     ## stop a running sweep and its agents
+	@pkill -f sweep.sh 2>/dev/null || true
+	@pkill -f orchestrate.py 2>/dev/null || true
+	@echo "stopped"
+
 clean-worktrees:          ## delete extracted worktrees only
+	$(no-run-in-flight)
 	@rm -rf pytest-worktrees && echo "worktrees removed"
 
 clean-state:              ## delete run state and logs (keeps instances.jsonl)
+	$(no-run-in-flight)
 	@rm -rf $(H)/state $(H)/runs && echo "state removed"
 
-clean: clean-worktrees clean-state  ## delete worktrees, state and venv
-	@rm -rf .venv && echo "venv removed"
+clean: clean-worktrees clean-state  ## delete worktrees and run state
+	@rm -f $(H)/results-*.json $(H)/results-*.md
+	@echo "results removed (venv kept - use clean-venv to drop it)"
+
+clean-venv:               ## delete the venv too (slow to rebuild)
+	$(no-run-in-flight)
+	@rm -rf .venv && echo "venv removed - run make setup"

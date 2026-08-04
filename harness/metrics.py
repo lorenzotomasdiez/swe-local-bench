@@ -90,8 +90,29 @@ def fmt(s: dict) -> list[str]:
             str(s["TN"]), mins, cost, tot]
 
 
+BEGIN, END = "<!-- RESULTS:BEGIN -->", "<!-- RESULTS:END -->"
+
+
+def inject_readme(block: str) -> bool:
+    """Replace the README's results section in place.
+
+    Deterministic on purpose. The numbers already exist as JSON, so having a
+    model rewrite the README would add nondeterminism, spend and the risk of
+    it quietly reinterpreting a solve rate or reflowing the prose around it.
+    """
+    readme = HARNESS.parent / "README.md"
+    text = readme.read_text()
+    if BEGIN not in text or END not in text:
+        return False
+    head, rest = text.split(BEGIN, 1)
+    _, tail = rest.split(END, 1)
+    readme.write_text(f"{head}{BEGIN}\n{block.strip()}\n{END}{tail}")
+    return True
+
+
 def main() -> None:
-    want = sys.argv[1:]
+    want = [a for a in sys.argv[1:] if not a.startswith("-")]
+    to_readme = "--readme" in sys.argv[1:]
     found = sorted(p.name for p in (HARNESS / "state").iterdir()
                    if p.is_dir() and any(p.glob("*.json")))
     runners = [r for r in (want or found)]
@@ -148,8 +169,9 @@ def main() -> None:
             line += f"{mark} {cell:<13}"
         print(line)
 
+    plural = "runner" if len(runners) == 1 else "runners"
     md = ["# Cross-runner metrics\n",
-          f"{len(ids)} instances common to {len(runners)} runners.\n"]
+          f"{len(ids)} instances, {len(runners)} {plural}.\n"]
     if dropped:
         md.append("Dropped, not attempted by every runner: "
                   + ", ".join(i.split("-")[-1] for i in dropped) + ".\n")
@@ -175,7 +197,30 @@ def main() -> None:
                   + " | ".join(cells) + " |")
 
     (HARNESS / "metrics.md").write_text("\n".join(md) + "\n")
-    print(f"\n{D}wrote metrics.md{X}")
+    written = "metrics.md"
+
+    if to_readme:
+        block = [
+            f"Last sweep: **{len(ids)} instances**, {len(runners)} {plural}, "
+            f"judged by Claude `opus`.\n",
+            "| Runner | Solve rate | TP | FP | FN | TN | Avg time | "
+            "Avg cost | Total |",
+            "|---|---|---|---|---|---|---|---|---|",
+            *["| " + " | ".join(fmt(s)) + " |" for s in rows],
+            "",
+            "`TP` passed and judged valid. `FP` passed but judged wrong. "
+            "`FN` judged valid but failed. `TN` failed and judged wrong.",
+            "",
+            "Solve rate alone overstates a runner that scores `FP`, and "
+            "understates one that scores `FN`.",
+            "Per-instance detail is in `harness/metrics.md`.",
+        ]
+        if inject_readme("\n".join(block)):
+            written += " and README.md"
+        else:
+            print(f"{R}README markers missing - skipped{X}")
+
+    print(f"\n{D}wrote {written}{X}")
 
 
 if __name__ == "__main__":
