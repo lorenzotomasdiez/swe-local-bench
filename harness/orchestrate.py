@@ -533,7 +533,24 @@ async def run_instance(inst):
         if not probe_ok:
             st.done("failed", "probe failed")
             return
+
         if not agent_ok:
+            # The agent failed to deliver a fix - it timed out, crashed, or
+            # produced no diff at all. That is a failed attempt, not an
+            # unmeasurable one, so it scores as unresolved rather than
+            # dropping out of the denominator. Excluding it would reward a
+            # runner for failing loudly: an agent that edits nothing on three
+            # instances would score better than one that tries and misses.
+            #
+            # The exception is an instance with no failing baseline, which
+            # cannot discriminate anything for any runner.
+            why = (st.d["stages"].get("capture", {}).get("error")
+                   or st.d["stages"].get("agent", {}).get("error")
+                   or st.d["stages"].get("agent", {}).get("status")
+                   or "agent failed")
+            if st.d.get("f2p"):
+                st.d["resolved"] = False
+                st.d["note"] = f"NO_FIX: {why}"
             st.done(st.d["stages"].get("agent", {}).get("status", "failed"))
             return
         if not await stage_test(inst, st):

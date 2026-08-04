@@ -45,8 +45,11 @@ def classify(d: dict) -> str | None:
     the other.
     """
     resolved, verdict = d.get("resolved"), d.get("similarity")
-    if resolved is None or verdict is None:
+    if resolved is None:
         return None
+    # No verdict means there was no diff to judge - the agent produced
+    # nothing, or died before it could. Absence of a fix is not a valid fix,
+    # so it counts against the runner rather than going uncounted.
     valid = verdict in VALID
     return ("TP" if resolved and valid else
             "FP" if resolved else
@@ -77,6 +80,12 @@ def stats(runner: str, states: dict, ids: list[str]) -> dict:
         "cost_total": sum(costs) if costs else None,
         "cost_avg": sum(costs) / len(costs) if costs else None,
         "secs_avg": sum(secs) / len(secs) if secs else None,
+        # What a fix actually costs. Cost per issue flatters a runner that
+        # gives up cheaply; this divides by what it got right, and by TP
+        # rather than resolved so that passing the tests with a fix the judge
+        # rejects does not count as a win.
+        "cost_per_win": (sum(costs) / cells.count("TP")
+                         if costs and cells.count("TP") else None),
     }
 
 
@@ -86,8 +95,9 @@ def fmt(s: dict) -> list[str]:
     cost = f"${s['cost_avg']:.4f}" if s["cost_avg"] is not None else "-"
     tot = f"${s['cost_total']:.2f}" if s["cost_total"] is not None else "-"
     mins = f"{s['secs_avg'] / 60:.1f}m" if s["secs_avg"] is not None else "-"
+    win = f"${s['cost_per_win']:.2f}" if s["cost_per_win"] is not None else "-"
     return [s["runner"], rate, str(s["TP"]), str(s["FP"]), str(s["FN"]),
-            str(s["TN"]), mins, cost, tot]
+            str(s["TN"]), mins, cost, tot, win]
 
 
 BEGIN, END = "<!-- RESULTS:BEGIN -->", "<!-- RESULTS:END -->"
@@ -137,7 +147,7 @@ def main() -> None:
 
     w = max(len(r) for r in runners) + 2
     hdr = (f"{'RUNNER':<{w}}{'SOLVE RATE':<14}{'TP':<5}{'FP':<5}{'FN':<5}"
-           f"{'TN':<5}{'AVG TIME':<11}{'AVG COST':<11}TOTAL")
+           f"{'TN':<5}{'AVG TIME':<11}{'AVG COST':<11}{'TOTAL':<10}$/WIN")
     print(f"\n{B}{len(ids)} instances, {len(runners)} runners{X}")
     if dropped:
         print(f"{D}dropped (not run by every runner): "
@@ -146,7 +156,8 @@ def main() -> None:
     for s, r in zip(rows, runners):
         c = fmt(s)
         print(f"{c[0]:<{w}}{c[1]:<14}{G}{c[2]:<5}{X}{R}{c[3]:<5}{X}"
-              f"{Y}{c[4]:<5}{X}{D}{c[5]:<5}{X}{c[6]:<11}{c[7]:<11}{c[8]}")
+              f"{Y}{c[4]:<5}{X}{D}{c[5]:<5}{X}{c[6]:<11}{c[7]:<11}"
+              f"{c[8]:<10}{B}{c[9]}{X}")
 
     print(f"\n{D}TP passed tests + judged valid   "
           f"FP passed tests but judged wrong{X}")
@@ -176,8 +187,8 @@ def main() -> None:
         md.append("Dropped, not attempted by every runner: "
                   + ", ".join(i.split("-")[-1] for i in dropped) + ".\n")
     md += ["| Runner | Solve rate | TP | FP | FN | TN | Avg time | "
-           "Avg cost | Total |",
-           "|---|---|---|---|---|---|---|---|---|"]
+           "Avg cost | Total | $/win |",
+           "|---|---|---|---|---|---|---|---|---|---|"]
     md += ["| " + " | ".join(fmt(s)) + " |" for s in rows]
     md += ["",
            "TP passed tests and judged valid. "
@@ -211,8 +222,8 @@ def main() -> None:
             f"Last sweep: **{len(ids)} instances**, {len(runners)} {plural}, "
             f"judged by Claude `opus`.\n",
             "| Runner | Solve rate | TP | FP | FN | TN | Avg time | "
-            "Avg cost | Total |",
-            "|---|---|---|---|---|---|---|---|---|",
+            "Avg cost | Total | $/win |",
+            "|---|---|---|---|---|---|---|---|---|---|",
             *["| " + " | ".join(fmt(s)) + " |" for s in rows],
             "",
             "`TP` passed and judged valid. `FP` passed but judged wrong. "
