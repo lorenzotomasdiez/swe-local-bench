@@ -32,6 +32,30 @@ The destructive targets refuse to run while a sweep is in flight, since a run co
 `make setup` is idempotent and verifies rather than assumes.
 `make doctor` checks the environment without changing anything.
 
+## Commands
+
+`make help` lists these at any time.
+
+| Command | What it does |
+|---|---|
+| `make setup` | install and verify everything |
+| `make doctor` | verify the environment, change nothing |
+| `make instances` | re-mine PRs into `instances.jsonl` |
+| `make runners` | list the runners that can be benchmarked |
+| `make sweep` | benchmark runners over the same instances |
+| `make pilot RUNNER=x` | benchmark one runner |
+| `make ids IDS=14493` | run specific PRs |
+| `make status` | snapshot a run in progress, from any shell |
+| `make metrics` | cross-runner table and confusion matrix |
+| `make report` | per-runner detail |
+| `make compare A=x B=y` | two-runner diff |
+| `make stop` | halt a sweep and every agent it spawned |
+| `make clean` | drop worktrees, run state and per-runner reports |
+| `make clean-venv` | drop the venv too, slow to rebuild |
+
+`sweep`, `pilot` and `ids` all pass `--fresh`, which discards prior results for the instances they touch.
+`sweep` warns before doing so.
+
 ## How an instance is scored
 
 Each instance is one merged pull request that closes at least one issue and touches both `src/` and `testing/`.

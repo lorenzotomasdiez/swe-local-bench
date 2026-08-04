@@ -56,8 +56,10 @@ fi
 if [ "$MODE" = "doctor" ]; then
   step "venv"
   [ -x "$VENV/bin/python" ] && ok "venv built" || bad "venv missing - run: make setup"
+  # grep -c, not wc -l: the file has no trailing newline, so wc undercounts
+  # by one and the dataset silently looks smaller than it is.
   [ -f "$ROOT/harness/instances.jsonl" ] \
-    && ok "instances.jsonl ($(wc -l < "$ROOT/harness/instances.jsonl" | tr -d ' ') instances)" \
+    && ok "instances.jsonl ($(grep -c . "$ROOT/harness/instances.jsonl") instances)" \
     || bad "instances.jsonl missing - run: make instances"
   [ "$FAIL" = 0 ] && printf '\n\033[32mall good\033[0m\n' || printf '\n\033[31mproblems found\033[0m\n'
   exit "$FAIL"
