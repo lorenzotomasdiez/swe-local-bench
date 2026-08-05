@@ -17,7 +17,12 @@ G, Y, R, B, D, X = (
     "\033[32m", "\033[33m", "\033[31m", "\033[36m", "\033[2m", "\033[0m"
 )
 GLYPH = {"ok": f"{G}●{X}", "running": f"{Y}◐{X}", "failed": f"{R}✗{X}",
-         "timeout": f"{R}✗{X}", None: f"{D}·{X}"}
+         "timeout": f"{R}✗{X}", "invalid": f"{Y}⊘{X}", None: f"{D}·{X}"}
+
+
+def glyph(status) -> str:
+    """Any status the table cannot name would otherwise crash the display."""
+    return GLYPH.get(status, f"{R}?{X}")
 
 
 def read(ids):
@@ -28,6 +33,18 @@ def read(ids):
                    else {"id": iid, "stage": None, "status": "pending",
                          "stages": {}, "started": None})
     return out
+
+
+def _running(d) -> str:
+    """The stages actually in flight, not the last one to have started.
+
+    `state["stage"]` is whatever called begin() most recently, and the
+    validation and agent branches run concurrently - so an instance whose
+    agent has been working for 15 minutes would report `gold`, the short
+    stage that happened to start second.
+    """
+    return "+".join(s for s in STAGES
+                    if d.get("stages", {}).get(s, {}).get("status") == "running")
 
 
 def _elapsed(d):
@@ -46,12 +63,12 @@ def table(ids) -> str:
     L = [f"{B}runner: {RUNNER}{X}",
          f"{'INSTANCE':<14}{pipe_hdr}  {'ELAPSED':<9}{'COST':<9}{'F2P':<7}"
          f"{'RESOLVED':<10}{'JUDGE':<20}STATUS",
-         D + "─" * 118 + X]
+         D + "─" * (88 + 5 * len(STAGES)) + X]
     for d in rows:
         pipe = "".join(
-            GLYPH.get(d["stages"].get(s, {}).get("status")).ljust(
-                5 + len(GLYPH.get(d["stages"].get(s, {}).get("status"))) - 1)
-            for s in STAGES
+            # ljust must not count the colour escapes, hence the correction.
+            glyph(g).ljust(5 + len(glyph(g)) - 1)
+            for g in (d["stages"].get(s, {}).get("status") for s in STAGES)
         )
         t = d["stages"].get("test", {})
         f2p = (f"{t['f2p_passed']}/{t['f2p_total']}"
@@ -62,8 +79,8 @@ def table(ids) -> str:
         sim = d.get("similarity") or "-"
         status = d.get("status", "")
         col = (G if status == "ok" else R if status in ("failed", "timeout")
-               else Y if status == "running" else D)
-        cur = d.get("stage") or ""
+               else Y if status == "running" else D)  # discarded reads as dim
+        cur = _running(d) or d.get("stage") or ""
         note = f"  {D}{d.get('note', '')[:38]}{X}" if d.get("note") else ""
         c = d.get("agent_cost_usd")
         cost = f"${c:.4f}" if isinstance(c, (int, float)) else "-"
@@ -79,6 +96,7 @@ def summary(ids) -> str:
     scored = [d for d in done if d.get("resolved") is not None]
     solved = [d for d in scored if d["resolved"]]
     nodisc = [d for d in done if "NO_DISCRIMINATOR" in (d.get("note") or "")]
+    gold = [d for d in done if d.get("status") == "discarded"]
     bad = [d for d in done if d.get("status") in ("failed", "timeout")]
     pct = f"{100 * len(solved) / len(scored):.0f}%" if scored else "n/a"
 
@@ -92,18 +110,35 @@ def summary(ids) -> str:
 
     return (f"\n{B}resolved {len(solved)}/{len(scored)} scored ({pct}){X}"
             f"   |  no-discriminator: {len(nodisc)}"
+            f"   |  gold-discarded: {len(gold)}"
             f"   |  failed/timeout: {len(bad)}"
             f"   |  complete: {len(done)}/{len(rows)}"
             f"{spend}{dur}")
 
 
+HEARTBEAT = 60  # seconds between progress lines in plain mode
+
+
 async def live(ids, tasks, plain=False):
     """Redraw the table until every task finishes."""
+    seen, tick = {}, 0
     try:
         while True:
             if plain:
+                # Plain mode goes to a file (sweep.sh redirects it), and a
+                # redirected stdout is block-buffered: without an explicit
+                # flush nothing reaches the log until 8KB have accumulated.
+                # A 20-minute agent stage then looks exactly like a hang.
+                # Print on state change, and a heartbeat in between so a slow
+                # stage still proves it is alive.
+                tick += 1
                 for d in read(ids):
-                    print(f"[{d['id']}] {d.get('stage')} {d.get('status')}")
+                    now = f"{_running(d) or d.get('stage')} {d.get('status')}"
+                    if seen.get(d["id"]) != now:
+                        seen[d["id"]] = now
+                        print(f"[{d['id']}] {now} ({_elapsed(d)})", flush=True)
+                if tick % HEARTBEAT == 0:
+                    print(summary(ids).strip(), flush=True)
             else:
                 sys.stdout.write("\033[H\033[J" + table(ids) + summary(ids) + "\n")
                 sys.stdout.flush()

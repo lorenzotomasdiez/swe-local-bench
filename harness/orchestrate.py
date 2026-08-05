@@ -4,10 +4,14 @@
 Each instance advances through an independent stage machine. Nothing is
 batched: instance A can be in `judge` while instance B is still in `setup`.
 
-    setup ─┬─► probe  (measures FAIL_TO_PASS in a throwaway copy)  ─┐
-           └─► agent ─► capture                                    ─┴─► test ─► judge
+    setup ─┬─► probe ─► gold  (validate the instance in throwaway copies) ─┐
+           └─► agent ─► capture                                           ─┴─► test ─► judge
 
-The agent copy never sees the tests. The probe copy is deleted before scoring.
+`probe` proves the tests fail without the fix; `gold` proves they pass with
+it. An instance that fails either half is unmeasurable, not hard.
+
+The agent copy never sees the tests. Both evaluation copies live under a
+separate root and are deleted before scoring.
 """
 
 from __future__ import annotations
@@ -24,6 +28,8 @@ import time
 
 from config import (
     AGENT,
+    AGENT_TREES,
+    EVAL_TREES,
     HARNESS,
     INSTANCES,
     LIMITS,
@@ -37,7 +43,6 @@ from config import (
     STATE,
     TIMEOUTS,
     VERSION_STUB,
-    WORKTREES,
 )
 import render
 
@@ -327,10 +332,14 @@ SEM = {k: asyncio.Semaphore(v) for k, v in LIMITS.items()}
 async def stage_setup(inst, st):
     async with SEM["setup"]:
         st.begin("setup")
-        wt = WORKTREES / inst["instance_id"]
-        await materialize(wt / "agent", inst["base_commit"], scrub=True)
-        await materialize(wt / "probe", inst["base_commit"], scrub=True)
-        (RUNS / inst["instance_id"]).mkdir(parents=True, exist_ok=True)
+        iid = inst["instance_id"]
+        # `gold` materializes its own copy when it runs: an instance with no
+        # failing baseline never reaches it, and extracting ~40MB per instance
+        # up front to delete it unused is pure disk churn.
+        await materialize(AGENT_TREES / iid, inst["base_commit"], scrub=True)
+        await materialize(EVAL_TREES / iid / "probe", inst["base_commit"],
+                          scrub=True)
+        (RUNS / iid).mkdir(parents=True, exist_ok=True)
         st.end("setup", "ok")
 
 
@@ -338,7 +347,7 @@ async def stage_probe(inst, st):
     """Apply the tests at base_commit and see which fail. Then delete."""
     async with SEM["probe"]:
         st.begin("probe")
-        wt = WORKTREES / inst["instance_id"] / "probe"
+        wt = EVAL_TREES / inst["instance_id"] / "probe"
         run = RUNS / inst["instance_id"]
         (run / "test_patch.diff").write_text(inst["test_patch"])
         rc, out = await sh(["git", "apply", str(run / "test_patch.diff")], cwd=wt)
@@ -374,6 +383,81 @@ async def stage_probe(inst, st):
         return True
 
 
+def score(res: dict, f2p: list[str], p2p: list[str]):
+    """Split a test run into (FAIL_TO_PASS fixed, PASS_TO_PASS broken).
+
+    Shared by `gold` and `test` so the two cannot drift apart. If gold were
+    graded by even slightly different rules than the agent, the instances it
+    validates would not be the instances the agent is scored on.
+    """
+    return (
+        [t for t in f2p if res.get(t) == "PASSED"],
+        [t for t in p2p if res.get(t) not in ("PASSED", "SKIPPED", "XFAIL")],
+    )
+
+
+async def stage_gold(inst, st):
+    """Apply the maintainers' own fix and require the tests to pass.
+
+    probe proves the tests fail without the fix. On its own that is not enough
+    to call an instance valid: tests can fail for reasons the PR never
+    addressed - a missing fixture, an environment mismatch, a dependency of
+    the diff that resolve.py dropped because it lived outside `src/` and
+    `testing/`. Such a test is indistinguishable from a real FAIL_TO_PASS and
+    is unresolvable by any agent, so it would show up as every runner failing
+    a hard problem rather than as a broken instance.
+
+    gold closes that: base + patch + test_patch must make every FAIL_TO_PASS
+    test pass with no PASS_TO_PASS regression - the exact assertion `test`
+    makes about the agent, applied to the reference fix. If the reference fix
+    cannot pass its own tests here, the instance is discarded and never enters
+    the denominator.
+    """
+    async with SEM["gold"]:
+        st.begin("gold")
+        wt = EVAL_TREES / inst["instance_id"] / "gold"
+        run = RUNS / inst["instance_id"]
+        try:
+            await materialize(wt, inst["base_commit"], scrub=True)
+            (run / "gold.patch").write_text(inst["patch"])
+            for name in ("gold.patch", "test_patch.diff"):
+                rc, out = await sh(["git", "apply", str(run / name)], cwd=wt)
+                if rc != 0:
+                    st.end("gold", "failed",
+                           error=f"{name} did not apply: {out[:300]}")
+                    return False
+            # `git apply` can restore the version file to its committed form,
+            # which does not exist in a raw checkout. Rewrite it for the same
+            # reason stage_test does.
+            write_version_stub(wt)
+            res, _, _ = await pytest_run(
+                wt, st.d["targets"], TIMEOUTS["gold"], run / "gold.log"
+            )
+            if not res:
+                # As in probe: nothing parsed is a harness failure, and calling
+                # it an invalid instance would hide the bug behind a discard.
+                st.end("gold", "failed",
+                       error="no test results parsed - see gold.log")
+                return False
+            f2p_ok, p2p_bad = score(res, st.d["f2p"], st.d["p2p"])
+            missing = [t for t in st.d["f2p"] if t not in f2p_ok]
+            if missing or p2p_bad:
+                # `invalid`, not `failed`: the harness worked, the instance
+                # does not. Only this outcome discards it.
+                st.end("gold", "invalid",
+                       f2p_passed=len(f2p_ok), f2p_total=len(st.d["f2p"]),
+                       p2p_broken=len(p2p_bad),
+                       error="reference fix does not pass its own tests: "
+                             f"{len(missing)}/{len(st.d['f2p'])} F2P failing"
+                             + (f", {len(p2p_bad)} P2P broken" if p2p_bad else ""))
+                return False
+            st.end("gold", "ok", f2p_passed=len(f2p_ok),
+                   f2p_total=len(st.d["f2p"]))
+            return True
+        finally:
+            shutil.rmtree(wt, ignore_errors=True)  # holds the answer; never keep it
+
+
 AGENT_PROMPT = """You are working in a checkout of the pytest source code that \
 contains a bug. Below is the issue report describing it.
 
@@ -388,7 +472,7 @@ Fix the bug. Edit the source under `src/`. Do not ask questions; make the change
 async def stage_agent(inst, st):
     async with SEM["agent"]:
         st.begin("agent")
-        wt = WORKTREES / inst["instance_id"] / "agent"
+        wt = AGENT_TREES / inst["instance_id"]
         run = RUNS / inst["instance_id"]
         try:
             cost = await run_agent(
@@ -417,7 +501,7 @@ only the description.
 async def stage_capture(inst, st):
     async with SEM["capture"]:
         st.begin("capture")
-        wt = WORKTREES / inst["instance_id"] / "agent"
+        wt = AGENT_TREES / inst["instance_id"]
         run = RUNS / inst["instance_id"]
         await sh(["git", "add", "-A"], cwd=wt)
         _, diff = await sh(["git", "diff", "--cached"], cwd=wt)
@@ -446,7 +530,7 @@ async def stage_test(inst, st):
     """
     async with SEM["test"]:
         st.begin("test")
-        wt = WORKTREES / inst["instance_id"] / "agent"
+        wt = AGENT_TREES / inst["instance_id"]
         run = RUNS / inst["instance_id"]
         outside_src = ":(exclude)src"
         await sh(["git", "restore", "--source=HEAD", "--staged", "--worktree",
@@ -463,8 +547,7 @@ async def stage_test(inst, st):
             TIMEOUTS["test"], run / "test.log"
         )
         f2p, p2p = st.d["f2p"], st.d["p2p"]
-        f2p_ok = [t for t in f2p if res.get(t) == "PASSED"]
-        p2p_bad = [t for t in p2p if res.get(t) not in ("PASSED", "SKIPPED", "XFAIL")]
+        f2p_ok, p2p_bad = score(res, f2p, p2p)
         resolved = bool(f2p) and len(f2p_ok) == len(f2p) and not p2p_bad
         st.d["resolved"] = resolved if f2p else None
         st.end("test", "ok", f2p_passed=len(f2p_ok), f2p_total=len(f2p),
@@ -522,16 +605,43 @@ async def run_instance(inst):
         if not st.skip("setup"):
             await stage_setup(inst, st)
 
-        # probe and agent are independent: run them concurrently.
-        probe = asyncio.create_task(stage_probe(inst, st))
+        async def validate():
+            """probe then gold: is this instance measurable at all?
+
+            Returns "ok", or the name of the stage that says it is not.
+            gold needs probe's target list and baseline, so the two are
+            sequential - but the pair runs alongside the agent, since neither
+            half looks at anything the agent produces.
+            """
+            if not await stage_probe(inst, st):
+                return "probe"
+            if not st.d.get("f2p"):
+                return "ok"  # no discriminator; nothing for gold to prove
+            return "ok" if await stage_gold(inst, st) else "gold"
 
         async def agent_chain():
             return await stage_agent(inst, st) and await stage_capture(inst, st)
 
-        agent_ok, probe_ok = await asyncio.gather(agent_chain(), probe)
+        agent_ok, valid = await asyncio.gather(agent_chain(), validate())
 
-        if not probe_ok:
+        if valid == "probe":
             st.done("failed", "probe failed")
+            return
+
+        if valid == "gold":
+            gold = st.d["stages"]["gold"]
+            if gold["status"] != "invalid":
+                # The gold patch did not apply, or nothing parsed: a harness or
+                # dataset bug, which must stay loud instead of being written
+                # off as an instance the benchmark cannot measure.
+                st.done("failed", f"gold stage failed: {gold.get('error', '')}")
+                return
+            # The reference fix could not pass the reference tests, so nothing
+            # measured here means anything. `resolved` stays None: the instance
+            # is discarded, not lost, and drops out of the denominator for
+            # every runner rather than counting as a failure for whoever
+            # happened to draw it.
+            st.done("discarded", f"GOLD_FAILED: {gold.get('error', '')}")
             return
 
         if not agent_ok:

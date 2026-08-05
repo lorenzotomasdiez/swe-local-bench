@@ -8,14 +8,14 @@ Currently targets [`pytest-dev/pytest`](https://github.com/pytest-dev/pytest).
 ## Results
 
 <!-- RESULTS:BEGIN -->
-Last sweep: **10 instances**, 4 runners, judged by Claude `opus`.
+Last sweep: **2 instances**, 4 runners, judged by Claude `opus`.
 
 | Runner | Solve rate | TP | FP | FN | TN | Avg time | Avg cost | Total | $/win |
 |---|---|---|---|---|---|---|---|---|---|
-| claude-haiku | 4/10 (40%) | 3 | 1 | 1 | 5 | 4.9m | $0.5987 | $5.99 | $2.00 |
-| claude-opus | 6/10 (60%) | 5 | 1 | 3 | 1 | 4.0m | $1.2829 | $12.83 | $2.57 |
-| claude-sonnet | 7/10 (70%) | 6 | 1 | 1 | 2 | 3.6m | $1.1714 | $11.71 | $1.95 |
-| pi-deepseek-v4-flash | 7/10 (70%) | 4 | 3 | 1 | 2 | 7.3m | $0.0606 | $0.55 | $0.14 |
+| pi-deepseek-v4-flash | 1/2 (50%) | 0 | 1 | 1 | 0 | 10.3m | $0.1525 | $0.31 | - |
+| claude-haiku | 0/2 (0%) | 0 | 0 | 1 | 1 | 5.4m | $0.6626 | $1.33 | - |
+| claude-sonnet | 0/2 (0%) | 0 | 0 | 2 | 0 | 1.7m | $0.5770 | $1.15 | - |
+| claude-opus | 0/2 (0%) | 0 | 0 | 2 | 0 | 3.7m | $0.9861 | $1.97 | - |
 
 `TP` passed and judged valid. `FP` passed but judged wrong. `FN` judged valid but failed. `TN` failed and judged wrong.
 
@@ -65,8 +65,12 @@ The destructive targets refuse to run while a sweep is in flight, since a run co
 | `make clean` | drop worktrees, run state and per-runner reports |
 | `make clean-venv` | drop the venv too, slow to rebuild |
 
-`sweep`, `pilot` and `ids` all pass `--fresh`, which discards prior results for the instances they touch.
-`sweep` warns before doing so.
+`sweep`, `pilot` and `ids` all pass `--fresh`, which discards prior results for the instances they touch, and only those.
+Results for instances outside the current selection survive, and `make metrics` still counts them: a `PILOT=2` sweep on top of a previous `PILOT=10` one reports ten instances, two of them fresh.
+`sweep` says how many of each up front, and `make clean-state` gives a clean slate.
+
+`make metrics` refuses to write the README when the state it would publish contains an instance that never finished, or one measured before the `gold` stage existed.
+An interrupted sweep is exactly when the numbers still on disk belong to the previous run, and a stale table under "Last sweep" is indistinguishable from a current one.
 
 ## How an instance is scored
 
@@ -74,11 +78,16 @@ Each instance is one merged pull request that closes at least one issue and touc
 Its diff is split in two: `patch` (the source fix) and `test_patch` (the tests proving it).
 
 ```
-setup ─┬─► probe   apply test_patch at base_commit, record which tests FAIL
+setup ─┬─► probe ─► gold   probe  apply test_patch at base_commit, record which FAIL
+       │                   gold   apply patch too, require every one of them to PASS
        └─► agent ─► capture      agent sees only the issue text
                           └────────► test    restore tests, apply test_patch, re-run
                                        └────► judge   compare against the real fix
 ```
+
+`probe` and `gold` are the two halves of validating an instance: the tests must fail without the maintainers' fix and pass with it.
+An instance that fails either half is unmeasurable rather than hard, and is reported as **discarded** instead of entering the denominator.
+Only the agent branch is scored.
 
 Two independent verdicts, deliberately kept separate:
 
@@ -108,6 +117,21 @@ These are the non-obvious parts. Each was a bug that produced silently wrong res
 **The agent must not see future git history.**
 A `git worktree` shares the parent `.git`, which lets the agent read the actual fix commit and score ~100% for free.
 Instances are materialized with `git archive` into a fresh single-commit repo instead.
+
+**Nor the evaluation copies.**
+The `probe` copy holds the tests and the `gold` copy holds the actual fix, so both are extracted under `pytest-worktrees/eval/` while the agent works in `pytest-worktrees/agent/`.
+They are never siblings of the agent's checkout: a stray `ls ..` must not be able to hand over the answer.
+Each is deleted as soon as its stage is done, well before scoring.
+
+**A failing test is not proof of a valid instance.**
+`probe` establishes that the tests fail at `base_commit`, but tests fail for reasons the pull request never addressed: a missing fixture, an environment mismatch, or a part of the diff that lives outside `src/` and `testing/` and is therefore in neither `patch` nor `test_patch`.
+Such a test is indistinguishable from a real `FAIL_TO_PASS` and is unresolvable by any agent, so it would surface as every runner failing a hard problem rather than as a broken instance.
+`gold` closes that gap by making the same assertion `test` makes about the agent, against the reference fix: `base + patch + test_patch` must pass every `FAIL_TO_PASS` test with no `PASS_TO_PASS` regression.
+Both stages grade through the same function, so the rules that validate an instance cannot drift from the rules the agent is scored under.
+When `gold` fails, `resolved` stays `null` and the instance is discarded with the reason, for every runner at once - it is not counted as a loss against whichever runner happened to draw it.
+
+**Time and cost are summed over the scored instances only.**
+A discarded instance still burned agent money, but pricing a solve rate against work that solve rate does not account for makes `$/win` quietly wrong.
 
 **An editable install overrides `PYTHONPATH`.**
 `pip install -e` registers a meta-path finder that wins over `sys.path`, so every instance silently tests the main clone rather than its own checkout.
@@ -159,7 +183,9 @@ harness/
   report.py           per-runner detail       (gitignored)
   compare.py          two-runner diff
 pytest/               the repo under test     (gitignored)
-pytest-worktrees/     per-instance checkouts  (gitignored)
+pytest-worktrees/
+  agent/<id>/         what the agent edits    (gitignored)
+  eval/<id>/          probe and gold copies   (gitignored)
 harness/state|runs/   run state and logs      (gitignored)
 ```
 

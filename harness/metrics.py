@@ -56,15 +56,40 @@ def classify(d: dict) -> str | None:
             "FN" if valid else "TN")
 
 
+def unfinished(d: dict) -> bool:
+    """State left mid-flight by an interrupted or crashed run."""
+    return d.get("stage") != "done"
+
+
+def unvalidated(d: dict) -> bool:
+    """A result whose instance never went through the gold stage.
+
+    Only meaningful for instances that had a failing baseline: gold is skipped
+    when there is nothing to prove. These are results from before gold existed,
+    so nothing established that their tests can be passed at all.
+    """
+    return bool(d.get("f2p")) and "gold" not in d.get("stages", {})
+
+
+def matrix_cell(d: dict) -> str:
+    """The confusion-matrix cell for one result, or why it has none."""
+    return classify(d) or ("gold" if d.get("status") == "discarded" else "")
+
+
 def stats(runner: str, states: dict, ids: list[str]) -> dict:
     rows = [states[i] for i in ids if i in states]
     scored = [d for d in rows if d.get("resolved") is not None]
     solved = [d for d in scored if d["resolved"]]
 
     cells = [classify(d) for d in rows]
-    costs = [d["agent_cost_usd"] for d in rows
+    # Time and cost are summed over the same rows the solve rate is computed
+    # from. An instance excluded from the denominator - no discriminator, or
+    # a gold patch that did not validate - still burned agent money, but
+    # charging it here would price a solve rate against work that solve rate
+    # does not account for.
+    costs = [d["agent_cost_usd"] for d in scored
              if isinstance(d.get("agent_cost_usd"), (int, float))]
-    secs = [d["stages"]["agent"]["secs"] for d in rows
+    secs = [d["stages"]["agent"]["secs"] for d in scored
             if "secs" in d.get("stages", {}).get("agent", {})]
     bad = [d for d in rows if d.get("status") in ("failed", "timeout")]
 
@@ -72,6 +97,7 @@ def stats(runner: str, states: dict, ids: list[str]) -> dict:
         "runner": runner,
         "attempted": len(rows),
         "evaluated": len(scored),
+        "discarded": sum(1 for d in rows if d.get("status") == "discarded"),
         "resolved": len(solved),
         "rate": len(solved) / len(scored) if scored else None,
         **{k: cells.count(k) for k in ("TP", "FP", "FN", "TN")},
@@ -148,10 +174,34 @@ def main() -> None:
     w = max(len(r) for r in runners) + 2
     hdr = (f"{'RUNNER':<{w}}{'SOLVE RATE':<14}{'TP':<5}{'FP':<5}{'FN':<5}"
            f"{'TN':<5}{'AVG TIME':<11}{'AVG COST':<11}{'TOTAL':<10}$/WIN")
+    # Discarded by the gold stage: the reference fix could not pass the
+    # reference tests, so the instance measures nothing. Named rather than
+    # silently absent, because a shrinking denominator that nobody mentions
+    # is how a benchmark starts lying.
+    discarded = sorted(i for i in ids if any(
+        loaded[r][i].get("status") == "discarded" for r in runners))
+
     print(f"\n{B}{len(ids)} instances, {len(runners)} runners{X}")
     if dropped:
         print(f"{D}dropped (not run by every runner): "
               f"{', '.join(i.split('-')[-1] for i in dropped)}{X}")
+    if discarded:
+        print(f"{D}discarded (gold fix fails its own tests): "
+              f"{', '.join(i.split('-')[-1] for i in discarded)}{X}")
+
+    # Two ways the numbers below can be real-looking and meaningless. Both
+    # block publication rather than being footnoted: a stale README table is
+    # indistinguishable from a fresh one, and nobody re-reads the warning.
+    stuck = sorted(i for i in ids
+                   if any(unfinished(loaded[r][i]) for r in runners))
+    stale = sorted(i for i in ids
+                   if any(unvalidated(loaded[r][i]) for r in runners))
+    if stuck:
+        print(f"{R}incomplete - never finished: "
+              f"{', '.join(i.split('-')[-1] for i in stuck)}{X}")
+    if stale:
+        print(f"{R}pre-gold - never validated, from an earlier harness: "
+              f"{', '.join(i.split('-')[-1] for i in stale)}{X}")
     print(f"\n{hdr}\n{D}{'─' * len(hdr)}{X}")
     for s, r in zip(rows, runners):
         c = fmt(s)
@@ -176,8 +226,7 @@ def main() -> None:
             d = loaded[r][iid]
             res = d.get("resolved")
             mark = "✅" if res else "❌" if res is False else "–"
-            cell = classify(d) or ""
-            line += f"{mark} {cell:<13}"
+            line += f"{mark} {matrix_cell(d):<13}"
         print(line)
 
     plural = "runner" if len(runners) == 1 else "runners"
@@ -186,6 +235,9 @@ def main() -> None:
     if dropped:
         md.append("Dropped, not attempted by every runner: "
                   + ", ".join(i.split("-")[-1] for i in dropped) + ".\n")
+    if discarded:
+        md.append("Discarded, the reference fix does not pass its own tests: "
+                  + ", ".join(i.split("-")[-1] for i in discarded) + ".\n")
     md += ["| Runner | Solve rate | TP | FP | FN | TN | Avg time | "
            "Avg cost | Total | $/win |",
            "|---|---|---|---|---|---|---|---|---|---|"]
@@ -203,7 +255,7 @@ def main() -> None:
             d = loaded[r][iid]
             res = d.get("resolved")
             cells.append(("✅" if res else "❌" if res is False else "–")
-                         + " " + (classify(d) or ""))
+                         + " " + matrix_cell(d))
         md.append(f"| {insts.get(iid, {}).get('pr', '?')} | "
                   + " | ".join(cells) + " |")
 
@@ -217,10 +269,22 @@ def main() -> None:
         print(f"{R}nothing scored - README left untouched{X}")
         to_readme = False
 
+    # An interrupted sweep is also the case where the results that DO exist are
+    # the previous run's. Publishing them under "Last sweep" is the worst
+    # outcome available: a stale table that reads as current.
+    if to_readme and (stuck or stale):
+        why = ("instances never finished" if stuck
+               else "instances predate the gold stage")
+        print(f"{R}{why} - README left untouched. "
+              f"Re-run the sweep, or `make clean-state` first.{X}")
+        to_readme = False
+
     if to_readme:
         block = [
             f"Last sweep: **{len(ids)} instances**, {len(runners)} {plural}, "
-            f"judged by Claude `opus`.\n",
+            f"judged by Claude `opus`."
+            + (f" {len(discarded)} discarded: the reference fix does not pass "
+               "its own tests there." if discarded else "") + "\n",
             "| Runner | Solve rate | TP | FP | FN | TN | Avg time | "
             "Avg cost | Total | $/win |",
             "|---|---|---|---|---|---|---|---|---|---|",

@@ -28,13 +28,33 @@ for r in "${RUNNERS[@]}"; do
   esac
 done
 
-# --fresh discards prior results for these instances. Say so up front: an
-# accidental re-run of an already-benchmarked runner is expensive to undo.
+# --fresh discards prior results, but only for the instances this sweep
+# selects. Count exactly those: saying "10 results will be discarded" when a
+# PILOT=2 sweep deletes 2 of them and silently keeps 8 is worse than saying
+# nothing, because the kept ones are what metrics.py publishes at the end.
 printf 'sweep: %s instances x %s runner(s): %s\n' "$N" "${#RUNNERS[@]}" "${RUNNERS[*]}"
+SELECTED=$(head -n "$N" instances.jsonl | jq -r .instance_id)
 for r in "${RUNNERS[@]}"; do
-  n=$(ls "state/$r"/*.json 2>/dev/null | wc -l | tr -d ' ')
-  [ "$n" -gt 0 ] && printf '\033[33m  %s already has %s result(s) - they will be discarded\033[0m\n' "$r" "$n"
+  hit=0; keep=0
+  for f in "state/$r"/*.json; do
+    [ -e "$f" ] || continue
+    # -x: whole-line match. A substring test would count an instance whose id
+    # is a prefix of a selected one as selected.
+    if printf '%s\n' "$SELECTED" | grep -qxF "$(basename "$f" .json)"; then
+      hit=$((hit + 1))
+    else
+      keep=$((keep + 1))
+    fi
+  done
+  [ "$hit" -gt 0 ] && printf '\033[33m  %s: %s of the %s selected instance(s) already measured - those will be re-run\033[0m\n' "$r" "$hit" "$N"
+  # Stale results are not deleted, and metrics.py will fold them into the
+  # published table alongside this sweep's. That mixes two runs of possibly
+  # two different harness versions into one solve rate.
+  [ "$keep" -gt 0 ] && printf '\033[33m  %s: %s older result(s) kept and STILL COUNTED by make metrics - run make clean-state for a clean slate\033[0m\n' "$r" "$keep"
 done
+
+ABORTED=0
+trap 'ABORTED=1' INT TERM
 
 for r in "${RUNNERS[@]}"; do
   printf '\n\033[36m▸ %s (%s instances)\033[0m\n' "$r" "$N"
@@ -43,6 +63,15 @@ for r in "${RUNNERS[@]}"; do
   rc=$?
   RUNNER="$r" python3 render.py | tail -n +2
   [ $rc -eq 0 ] || printf '\033[31m%s exited %s - see /tmp/sweep-%s.log\033[0m\n' "$r" "$rc" "$r"
+  # Ctrl-C must end the sweep, not the current runner. Bash keeps looping after
+  # a child dies on SIGINT, so without this an interrupt silently demoted
+  # itself into "skip to the next runner" and every remaining runner got a few
+  # seconds of life before the next interrupt - four half-runs and no results.
+  if [ "$ABORTED" = 1 ] || [ $rc -eq 130 ]; then
+    printf '\033[31m\nsweep interrupted during %s - stopping here\033[0m\n' "$r"
+    printf '\033[33mstate for %s is incomplete; re-run or make clean-state\033[0m\n' "$r"
+    exit 130
+  fi
 done
 
 printf '\n\033[36m▸ metrics\033[0m\n'

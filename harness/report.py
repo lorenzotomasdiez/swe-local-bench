@@ -46,7 +46,9 @@ md = [f"# Results - runner: {RUNNER}\n",
       f"of instances with a valid failing baseline.\n",
       f"Total attempted: {len(rows)}. "
       f"Excluded for no failing baseline: "
-      f"{sum(1 for r in rows if 'NO_DISCRIMINATOR' in r['note'])}.\n"]
+      f"{sum(1 for r in rows if 'NO_DISCRIMINATOR' in r['note'])}. "
+      f"Discarded because the reference fix does not pass its own tests: "
+      f"{sum(1 for r in rows if 'GOLD_FAILED' in r['note'])}.\n"]
 if costs:
     md.append(f"Agent spend: ${sum(costs):.4f} total, "
               f"${sum(costs) / len(costs):.4f} average per issue.\n")

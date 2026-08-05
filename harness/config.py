@@ -9,6 +9,13 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 HARNESS = ROOT / "harness"
 REPO = ROOT / "pytest"
 WORKTREES = ROOT / "pytest-worktrees"
+
+# The agent's checkout and the evaluation checkouts live under separate roots.
+# The evaluation copies hold the tests and, for `gold`, the maintainers' actual
+# fix; keeping them out of the agent's sibling directories means a stray `ls ..`
+# cannot hand an agent the answer.
+AGENT_TREES = WORKTREES / "agent"
+EVAL_TREES = WORKTREES / "eval"
 VENV = ROOT / ".venv"
 PYTHON = VENV / "bin" / "python"
 
@@ -57,6 +64,7 @@ RUNS = HARNESS / "runs" / RUNNER
 LIMITS = {
     "setup": int(os.environ.get("W_SETUP", 6)),
     "probe": int(os.environ.get("W_PROBE", 6)),
+    "gold": int(os.environ.get("W_GOLD", 6)),
     "agent": int(os.environ.get("W_AGENT", 4)),
     "capture": int(os.environ.get("W_CAPTURE", 4)),
     "test": int(os.environ.get("W_TEST", 6)),
@@ -66,13 +74,14 @@ LIMITS = {
 TIMEOUTS = {
     "setup": 300,
     "probe": 900,
+    "gold": 900,
     "agent": int(os.environ.get("T_AGENT", 1800)),
     "capture": 300,
     "test": 900,
     "judge": 600,
 }
 
-STAGES = ["setup", "probe", "agent", "capture", "test", "judge"]
+STAGES = ["setup", "probe", "gold", "agent", "capture", "test", "judge"]
 
 # setuptools_scm generates this at build time; we synthesize it per worktree.
 VERSION_STUB = (
